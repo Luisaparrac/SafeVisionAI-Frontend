@@ -1,646 +1,438 @@
-
 import "./style.css";
+import { formatDate, formatNumber, getStoredLanguage, translate, type Language, type TranslationKey } from "./i18n";
+import {
+  ApiError,
+  SafeVisionApi,
+  type AlertRecord,
+  type CameraRecord,
+  type EventFilters,
+  type EventTypeRecord,
+  type LocationRecord,
+  type Metrics,
+  type RiskEvent,
+  type SubjectRecord,
+  type ZoneRecord,
+} from "./api";
 
-type Priority = "Alto" | "Medio" | "Bajo";
-type EventStatus = "Pendiente" | "Revisado";
+type Page = "overview" | "cameras" | "events" | "alerts" | "subjects" | "locations" | "settings";
+type Theme = "light" | "dark";
+type DataResource = "health" | "metrics" | "recentEvents" | "alerts" | "cameras" | "events" | "subjects" | "locations" | "zones" | "eventTypes";
+let language: Language = getStoredLanguage();
+const t = (key: TranslationKey): string => translate(language, key);
 
+const api = new SafeVisionApi();
+const LOCAL_DEV_SESSION_KEY = "safevision_local_dev_session";
+const isLocalhost = (): boolean => import.meta.env.DEV && ["localhost", "127.0.0.1", "::1"].includes(window.location.hostname);
+const labels: Record<Page, TranslationKey> = {
+  overview: "navOverview", cameras: "navCameras", events: "navEvents",
+  alerts: "navAlerts", subjects: "navSubjects", locations: "navLocations", settings: "navSettings",
+};
+const pageResources: Record<Page, DataResource[]> = {
+  overview: ["health", "metrics", "recentEvents", "alerts", "cameras"], cameras: ["cameras"],
+  events: ["events"], alerts: ["alerts"], subjects: ["subjects"],
+  locations: ["locations", "zones"], settings: ["eventTypes"],
+};
+const icons: Record<string, string> = {
+  overview: "<rect x='3' y='3' width='7' height='7' rx='1'/><rect x='14' y='3' width='7' height='7' rx='1'/><rect x='3' y='14' width='7' height='7' rx='1'/><rect x='14' y='14' width='7' height='7' rx='1'/>",
+  cameras: "<rect x='3' y='6' width='13' height='12' rx='2'/><path d='m16 10 5-3v10l-5-3z'/>",
+  events: "<circle cx='12' cy='12' r='9'/><path d='M12 7v5l3 2'/>",
+  alerts: "<path d='m10.3 3.9-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.7-3.1l-8-14a2 2 0 0 0-3.4 0Z'/><path d='M12 9v4m0 4h.01'/>",
+  subjects: "<path d='M16 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2M10 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm10-3v6m3-3h-6'/>",
+  locations: "<path d='M20 10c0 5-8 12-8 12S4 15 4 10a8 8 0 1 1 16 0Z'/><circle cx='12' cy='10' r='2.5'/>",
+  settings: "<circle cx='12' cy='12' r='3'/><path d='m19.4 15 .1.1 1.4 1.1-1.4 2.4-1.7-.7a8 8 0 0 1-1.6.9l-.3 1.8h-2.8l-.3-1.8a8 8 0 0 1-1.6-.9l-1.7.7-1.4-2.4 1.4-1.1a8 8 0 0 1 0-1.9l-1.4-1.1 1.4-2.4 1.7.7a8 8 0 0 1 1.6-.9l.3-1.8h2.8l.3 1.8a8 8 0 0 1 1.6.9l1.7-.7 1.4 2.4-1.4 1.1a8 8 0 0 1 0 1.9Z'/>",
+  search: "<circle cx='11' cy='11' r='7'/><path d='m20 20-4-4'/>",
+  refresh: "<path d='M20 7v5h-5M4 17v-5h5'/><path d='M5.6 9a7 7 0 0 1 11.7-2L20 12M4 12l2.7 5a7 7 0 0 0 11.7-2'/>",
+  logout: "<path d='M10 17l5-5-5-5M15 12H3'/><path d='M12 3h6a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-6'/>",
+  shield: "<path d='M12 22s8-4 8-11V5l-8-3-8 3v6c0 7 8 11 8 11Z'/><path d='m9 12 2 2 4-4'/>",
+};
+const icon = (name: string) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[name] ?? icons.overview}</svg>`;
+const brandLogo = (className = ""): string => { const theme = document.documentElement.dataset.theme === "light" ? "light" : "dark"; return `<img class="brand-logo ${className}" src="/images/safe-vision-ai-logo-${theme}.png" width="2172" height="724" alt="Safe Vision AI" draggable="false">`; };
+const escapeHtml = (value: unknown): string => String(value ?? "—").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] ?? c);
 
+class SafeVisionFrontend {
+  private page: Page = this.pageFromLocation();
+  private theme: Theme = this.initialTheme();
+  private reduceMotion = localStorage.getItem("safevision-reduce-motion") === "true";
+  private authStatus = t("authChecking");
+  private signInAvailable = false;
+  private localDevSession = false;
+  private loading = false;
+  private actionError = "";
+  private dataErrors: Partial<Record<DataResource, string>> = {};
+  private loadingResources = new Set<DataResource>();
+  private metrics: Metrics | null = null;
+  private recentEvents: RiskEvent[] = [];
+  private events: RiskEvent[] = [];
+  private alerts: AlertRecord[] = [];
+  private cameras: CameraRecord[] = [];
+  private subjects: SubjectRecord[] = [];
+  private locations: LocationRecord[] = [];
+  private zones: ZoneRecord[] = [];
+  private eventTypes: EventTypeRecord[] = [];
+  private filters: EventFilters = { limit: 50, offset: 0 };
+  private eventDetail: RiskEvent | null = null;
+  private readonly root = document.querySelector<HTMLDivElement>("#app");
 
-
-class RiskEvent {
-  public readonly id: number;
-  public readonly type: string;
-  public readonly subject: string;
-  public readonly location: string;
-  public readonly time: string;
-  public readonly priority: Priority;
-  public status: EventStatus;
-
-  constructor(
-    id: number,
-    type: string,
-    subject: string,
-    location: string,
-    time: string,
-    priority: Priority,
-    status: EventStatus
-  ) {
-    this.id = id;
-    this.type = type;
-    this.subject = subject;
-    this.location = location;
-    this.time = time;
-    this.priority = priority;
-    this.status = status;
+  initializeTheme(): void { this.applyTheme(); this.applyMotionPreference(); }
+  activateLocalDevSession(): void { this.localDevSession = true; }
+  async startPrivate(): Promise<void> {
+    window.addEventListener("popstate", () => { this.page = this.pageFromLocation(); this.eventDetail = null; void this.loadPage(); });
+    await this.loadPage();
+  }
+  get authenticationStatus(): string { return this.authStatus; }
+  async hasValidBackendSession(): Promise<boolean> {
+    await this.inspectAuthContract();
+    try {
+      const spec = await api.request<{ paths?: Record<string, Record<string, { operationId?: string; summary?: string }>> }>("/openapi.json");
+      const sessionPath = Object.entries(spec.paths ?? {}).find(([path, methods]) =>
+        Object.entries(methods).some(([method, operation]) => method.toLowerCase() === "get" &&
+          (/^\/(api\/)?(auth\/)?(me|session|profile|current-user)\/?$/i.test(path) || /current user|current session/i.test(`${operation.operationId ?? ""} ${operation.summary ?? ""}`))),
+      )?.[0];
+      if (!sessionPath) {
+        this.authStatus = t("accessUnavailable");
+        return false;
+      }
+      const session = await api.request<unknown>(sessionPath);
+      const user = session && typeof session === "object" && !Array.isArray(session) ? session as Record<string, unknown> : null;
+      const identity = user && (user.user && typeof user.user === "object" ? user.user as Record<string, unknown> : user);
+      if (!identity || !(identity.id || identity.sub || identity.email || identity.username || identity.user_id || user?.authenticated === true)) {
+        this.authStatus = t("identityFailed");
+        return false;
+      }
+      this.authStatus = t("sessionValidated");
+      return true;
+    } catch (error) {
+      console.error("Safe Vision AI: no se pudo validar la sesión", error);
+      this.authStatus = t("accessFailed");
+      return false;
+    }
   }
 
-  get priorityClass(): string {
-    return this.priority.toLowerCase();
+  private initialTheme(): Theme {
+    const stored = localStorage.getItem("safevision-theme");
+    if (stored === "light" || stored === "dark") return stored;
+    return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  }
+  private applyTheme(): void { document.documentElement.dataset.theme = this.theme; }
+  private applyMotionPreference(): void { document.documentElement.dataset.motion = this.reduceMotion ? "reduced" : "normal"; }
+  private pageFromLocation(): Page {
+    const key = window.location.pathname.replace(/^\/+|\/+$/g, "") as Page;
+    return key in labels ? key : "overview";
+  }
+  private async inspectAuthContract(): Promise<void> {
+    try {
+      const spec = await api.request<{ paths?: Record<string, Record<string, { operationId?: string; summary?: string }>> }>("/openapi.json");
+      const operations = Object.entries(spec.paths ?? {}).flatMap(([path, methods]) => Object.entries(methods).map(([method, operation]) => ({ path, method, operation })));
+      const login = operations.some(({ path, method, operation }) => method.toLowerCase() === "post" && (/auth|login|token/i.test(path) || /login|authenticate/i.test(operation.operationId ?? operation.summary ?? "")));
+      const session = operations.some(({ path, method, operation }) => method.toLowerCase() === "get" && (/me|session|profile/i.test(path) || /current user|session/i.test(operation.summary ?? "")));
+      this.signInAvailable = login && session;
+      this.authStatus = this.signInAvailable ? t("accessServiceReady") : t("accessUnavailable");
+    } catch (error) {
+      console.error("Safe Vision AI: no se pudo verificar el servicio de acceso", error);
+      this.authStatus = t("accessCheckFailed");
+    }
   }
 
-  get statusClass(): string {
-    return this.status === "Revisado" ? "reviewed" : "pending";
+  private render(): void {
+    if (!this.root) return;
+    this.root.innerHTML = `<div class="app-frame">${this.topbar()}<main class="main-area" aria-busy="${this.loading}"><section class="view-content">${this.pageView()}</section></main></div>`;
+    this.bind();
+  }
+  private wordmark(className = ""): string {
+    return brandLogo(className);
+  }
+  private navigation(): string {
+    const nav: Page[] = ["overview", "cameras", "events", "alerts", "subjects", "locations", "settings"];
+    return `<nav class="primary-navigation" aria-label="${t("navigationLabel")}">${nav.map(page => `<a class="nav-link ${this.page === page ? "selected" : ""}" href="/${page === "overview" ? "" : page}" data-page="${page}" ${this.page === page ? 'aria-current="page"' : ""}>${icon(page)}<span>${t(labels[page])}</span></a>`).join("")}</nav>`;
+  }
+  private topbar(): string {
+    return `<header class="app-header"><div class="header-main"><a class="header-brand" href="/" data-page="overview">${this.wordmark()}</a><div class="top-actions"><button class="icon-button" id="theme-toggle" aria-label="${t("themeToggle")}">${this.theme === "dark" ? "☼" : "◐"}</button><span class="account-state" aria-label="${t("profile")}">${this.localDevSession ? t("profile") : t("account")}</span>${this.localDevSession ? `<button class="button secondary local-logout" data-action="local-logout">${t("logout")}</button>` : ""}</div></div>${this.navigation()}</header>`;
+  }
+  private pageView(): string {
+    let view = "";
+    switch (this.page) {
+      case "overview": view = this.overviewView(); break;
+      case "cameras": view = this.camerasView(); break;
+      case "events": view = this.eventsView(); break;
+      case "alerts": view = this.alertsView(); break;
+      case "subjects": view = this.catalogView("subjectsTitle", this.subjects.map(s => ({ title: s.name, meta: s.subject_type, detail: s.description ?? "" })), "noSubjects", ["subjects"]); break;
+      case "locations": view = this.catalogView("locationsTitle", [...this.locations.map(l => ({ title: l.name, meta: t("locationType"), detail: l.description ?? "" })), ...this.zones.map(z => ({ title: z.name, meta: z.is_active ? t("activeZone") : t("inactiveZone"), detail: z.description ?? "" }))], "noLocations", ["locations", "zones"]); break;
+      case "settings": view = this.settingsView(); break;
+    }
+    return view;
+  }
+  private pageHeading(title: TranslationKey, subtitle?: TranslationKey, action = ""): string {
+    return `<section class="page-heading"><div><h1>${t(title)}</h1>${subtitle ? `<p>${t(subtitle)}</p>` : ""}</div>${action}</section>`;
+  }
+  private overviewView(): string {
+    const action = `<button class="button secondary" data-action="reload">${icon("refresh")} ${t("refresh")}</button>`;
+    return `${this.pageHeading("overviewTitle", "overviewSubtitle", action)}<div class="metric-grid">${this.metricCard("totalEvents", this.metrics?.total)}${this.metricCard("pendingEvents", this.metrics?.pendientes)}${this.metricCard("highRiskEvents", this.metrics?.alto)}</div>${this.resourceNotice("metrics")}<div class="content-grid"><article class="panel"><div class="panel-title"><div><h2>${t("cameraStatus")}</h2></div><a href="/cameras" data-page="cameras">${t("seeCameras")}</a></div>${this.cameras.length ? `${this.cameras.slice(0, 5).map(c => this.cameraRow(c)).join("")}${this.resourceNotice("cameras")}` : this.dataOrEmpty("cameras", this.empty("noCameras", "noCamerasToShow"))}</article><article class="panel"><div class="panel-title"><div><h2>${t("recentAlerts")}</h2></div><a href="/alerts" data-page="alerts">${t("seeAlerts")}</a></div>${this.alerts.length ? `${this.alerts.slice(0, 5).map(a => this.alertRow(a)).join("")}${this.resourceNotice("alerts")}` : this.dataOrEmpty("alerts", this.empty("noAlerts", "noAlertsToShow"))}</article></div><article class="panel recent-panel"><div class="panel-title"><div><h2>${t("recentActivity")}</h2></div><a href="/events" data-page="events">${t("openHistory")}</a></div>${this.eventTable(this.recentEvents, true)}</article>`;
+  }
+  private metricCard(title: TranslationKey, value?: number): string {
+    return `<article class="metric-card"><span>${t(title)}</span><strong>${value === undefined ? "—" : formatNumber(value, language)}</strong></article>`;
+  }
+  private camerasView(): string {
+    const selected = this.cameras[0];
+    const cameraCards = this.cameras.length ? `${this.cameras.map(c => this.cameraRow(c)).join("")}${this.resourceNotice("cameras")}` : this.dataOrEmpty("cameras", `<div class="empty-state compact-empty">${icon("cameras")}<b>${t("noCameraRecords")}</b><p>${t("noCamerasAvailable")}</p></div>`);
+    const playerState = `<div class="video-waiting">${icon("cameras")}<strong>${selected ? t("cameraStreamUnavailable") : t("noStream")}</strong><span>${selected ? t("noVideoNow") : t("noStream")}</span></div>`;
+    return `${this.pageHeading("camerasTitle", "camerasSubtitle")}<div class="monitor-layout"><section class="panel monitor-player-card"><div class="video-player" role="img" aria-label="${t("videoPlayer")}">${playerState}<div class="player-controls"><button type="button" disabled aria-label="${t("playbackUnavailable")}">▶</button><span>--:--</span><div class="player-track" aria-hidden="true"><i></i></div><span>--:--</span></div></div><div class="camera-info monitor-info"><div><h2>${selected ? escapeHtml(selected.name) : t("camera")}</h2><p>${selected ? `${t("camera")} ${formatNumber(selected.camera_id, language)} · ${t("location")} ${formatNumber(selected.location_id, language)}` : t("noCameraSelected")}</p></div><span class="state-tag">${selected ? escapeHtml(selected.status) : t("noData")}</span>${selected ? `<small>${t("cameraAddress")}: ${escapeHtml(selected.ip_address)}</small>` : ""}</div></section><aside class="panel camera-list"><div class="panel-title"><div><h2>${t("availableCameras")}</h2></div></div>${cameraCards}</aside></div>`;
+  }
+  private eventsView(): string {
+    const action = `<button class="button secondary" data-action="export" ${this.events.length ? "" : "disabled"}>${t("exportCsv")}</button>`;
+    const priorities: Array<[string, TranslationKey]> = [["Alto", "high"], ["Medio", "medium"], ["Bajo", "low"]];
+    const statuses: Array<[string, TranslationKey]> = [["Pendiente", "pending"], ["Revisado", "reviewed"]];
+    return `${this.pageHeading("eventsTitle", "eventsSubtitle", action)}<form class="filter-bar" id="event-filters"><label>${t("search")}<input name="q" value="${escapeHtml(this.filters.q ?? "")}" placeholder="${t("searchPlaceholder")}"></label><label>${t("priority")}<select name="prioridad"><option value="">${t("all")}</option>${priorities.map(([value, key]) => `<option value="${value}" ${this.filters.prioridad === value ? "selected" : ""}>${t(key)}</option>`).join("")}</select></label><label>${t("status")}<select name="estado"><option value="">${t("allStatuses")}</option>${statuses.map(([value, key]) => `<option value="${value}" ${this.filters.estado === value ? "selected" : ""}>${t(key)}</option>`).join("")}</select></label><label>${t("from")}<input type="date" name="desde" value="${escapeHtml(this.filters.desde ?? "")}"></label><label>${t("to")}<input type="date" name="hasta" value="${escapeHtml(this.filters.hasta ?? "")}"></label><button class="button primary">${t("apply")}</button></form><article class="panel table-panel">${this.eventTable(this.events, false)}</article><div class="pagination"><button class="button secondary" data-action="previous" ${!this.filters.offset ? "disabled" : ""}>${t("previous")}</button><span>${t("records")} ${formatNumber(Number(this.filters.offset ?? 0) + 1, language)}–${formatNumber(Number(this.filters.offset ?? 0) + this.events.length, language)}</span><button class="button secondary" data-action="next" ${this.events.length < Number(this.filters.limit) ? "disabled" : ""}>${t("next")}</button></div>`;
+  }
+  private eventTable(events: RiskEvent[], compact: boolean): string {
+    const resource: DataResource = compact ? "recentEvents" : "events";
+    const state = this.resourceNotice(resource);
+    const actionState = this.actionError ? this.inlineError(this.actionError, false) : "";
+    const stateRow = (content: string) => content ? `<tr><td colspan="7">${content}</td></tr>` : "";
+    const rows = events.length ? `${stateRow(actionState || state)}${events.map(event => `<tr><td><b>${escapeHtml(event.type)}</b><small>${escapeHtml(event.subject)}${event.description ? ` · ${escapeHtml(event.description)}` : ""}</small></td><td>${escapeHtml(formatDate(event.date, language))}<small>${escapeHtml(event.time)} (${t("sourceTime")})</small></td><td>${escapeHtml(event.location)}</td><td>${escapeHtml(event.camera)}</td><td><span class="risk ${this.riskTone(event.priority)}">${escapeHtml(event.priority)}</span></td><td>${escapeHtml(event.status)}</td><td><button class="link-button" data-event-id="${event.id}">${t("details")}</button>${!compact && event.status === "Pendiente" ? `<button class="link-button" data-review-id="${event.id}">${t("review")}</button>` : ""}</td></tr>`).join("")}` : stateRow(actionState || state) || `<tr><td colspan="7"><div class="table-empty">${icon("shield")}<b>${t("noActivity")}</b><span>${t("noEventsToShow")}</span></div></td></tr>`;
+    return `<div class="table-wrap"><table><thead><tr><th>${t("event")}</th><th>${t("dateTime")}</th><th>${t("locationHeader")}</th><th>${t("cameraHeader")}</th><th>${t("risk")}</th><th>${t("eventStatus")}</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  }
+  private alertsView(): string {
+    const state = this.resourceNotice("alerts");
+    const rows = this.alerts.length ? `${this.actionError ? `<tr><td colspan="5">${this.inlineError(this.actionError, false)}</td></tr>` : ""}${state ? `<tr><td colspan="5">${state}</td></tr>` : ""}${this.alerts.map(a => `<tr><td><span class="risk ${this.riskTone(a.nivel)}">${escapeHtml(a.nivel)}</span></td><td>${escapeHtml(formatDate(a.event.date, language))}<small>${escapeHtml(a.event.time)}</small></td><td><b>${escapeHtml(a.event.type)}</b><small>${escapeHtml(a.event.location)} · ${escapeHtml(a.event.camera)}</small></td><td>${escapeHtml(a.estado)}</td><td><button class="link-button" data-event-id="${a.event.id}">${t("viewEvent")}</button>${a.estado.toLowerCase() === "pendiente" ? `<button class="link-button" data-alert-seen="${a.id_alerta}">${t("markSeen")}</button>` : ""}</td></tr>`).join("")}` : (this.actionError ? this.inlineError(this.actionError, false) : state) ? `<tr><td colspan="5">${this.actionError ? this.inlineError(this.actionError, false) : state}</td></tr>` : `<tr><td colspan="5"><div class="table-empty">${icon("shield")}<b>${t("noAlertsRows")}</b><span>${t("noAlertsToShow")}</span></div></td></tr>`;
+    return `${this.pageHeading("alertsTitle", "alertsSubtitle")}<article class="panel table-panel"><div class="table-wrap"><table><thead><tr><th>${t("level")}</th><th>${t("dateTime")}</th><th>${t("event")}</th><th>${t("eventStatus")}</th><th>${t("actions")}</th></tr></thead><tbody>${rows}</tbody></table></div></article>`;
+  }
+  private catalogView(title: TranslationKey, items: Array<{ title: string; meta: string; detail: string }>, emptyMessage: TranslationKey, resources: DataResource[]): string {
+    const state = this.resourceNoticeFor(resources);
+    return `${this.pageHeading(title)}${items.length ? `<div class="catalog-grid">${items.map(item => `<article class="panel catalog-card"><span>${escapeHtml(item.meta)}</span><h2>${escapeHtml(item.title)}</h2><p>${escapeHtml(item.detail || t("noDescription"))}</p></article>`).join("")}</div>${state}` : state || this.empty(emptyMessage, "noRecords")}`;
+  }
+  private settingsView(): string {
+    const eventTypesState = this.resourceNotice("eventTypes");
+    return `${this.pageHeading("settingsTitle", "settingsSubtitle")}<section class="settings-group"><div class="settings-group-heading"><h2>${t("preferences")}</h2><p>${t("appearanceSubtitle")}</p></div><article class="panel settings-panel language-setting"><div><h3>${t("language")}</h3><p>${t("languagePreferenceDescription")}</p></div><label for="language-select">${t("language")}</label><select id="language-select" aria-label="${t("language")}"><option value="es" ${language === "es" ? "selected" : ""}>${t("spanish")}</option><option value="en" ${language === "en" ? "selected" : ""}>${t("english")}</option></select></article></section><section class="settings-group"><div class="settings-group-heading"><h2>${t("appearance")}</h2><p>${t("appearanceSubtitle")}</p></div><article class="panel settings-panel"><div><h3>${t("themeColor")}</h3><p>${t("themePreview")}</p></div><label for="theme-select">${t("theme")}</label><select id="theme-select"><option value="system">${t("followSystem")}</option><option value="light" ${this.theme === "light" ? "selected" : ""}>${t("light")}</option><option value="dark" ${this.theme === "dark" ? "selected" : ""}>${t("dark")}</option></select><button class="button secondary" data-action="theme-reset">${t("resetSystem")}</button></article></section><section class="settings-group"><div class="settings-group-heading"><h2>${t("accessibility")}</h2><p>${t("motionSettings")}</p></div><article class="panel accessibility-setting"><div><h3>${t("reduceAnimations")}</h3><p>${t("reduceAnimationsDescription")}</p></div><label class="switch-label" for="reduce-motion"><input type="checkbox" id="reduce-motion" ${this.reduceMotion ? "checked" : ""}><span>${t("enabled")}</span></label></article></section><section class="settings-group"><div class="settings-group-heading"><h2>${t("eventTypes")}</h2><p>${this.eventTypes.length ? `${formatNumber(this.eventTypes.length, language)} ${t("eventTypesAvailable")}` : (this.dataErrors.eventTypes || this.loadingResources.has("eventTypes")) ? "" : t("noEventTypes")}</p></div>${eventTypesState}</section>`;
+  }
+  private cameraRow(camera: CameraRecord): string {
+    const connected = ["connected", "conectada"].includes(camera.status.trim().toLowerCase());
+    return `<div class="list-row"><span class="device-dot ${connected ? "is-connected" : ""}"></span><div><b>${escapeHtml(camera.name)}</b><small>${t("camera")} ${formatNumber(camera.camera_id, language)} · ${t("location")} ${formatNumber(camera.location_id, language)}</small></div><span class="state-tag">${escapeHtml(camera.status)}</span></div>`;
+  }
+  private alertRow(alert: AlertRecord): string {
+    return `<div class="list-row"><span class="risk ${this.riskTone(alert.nivel)}">${escapeHtml(alert.nivel)}</span><div><b>${escapeHtml(alert.event.type)}</b><small>${escapeHtml(formatDate(alert.event.date, language))} ${escapeHtml(alert.event.time)} · ${escapeHtml(alert.event.location)}</small></div></div>`;
+  }
+  private riskTone(value: string): string { return value.toLowerCase() === "alto" ? "high" : value.toLowerCase() === "medio" ? "medium" : "low"; }
+  private empty(title: TranslationKey, detail: TranslationKey): string { return `<div class="empty-state">${icon("shield")}<b>${t(title)}</b><p>${t(detail)}</p></div>`; }
+  private inlineError(message: string, retry = true): string { return `<div class="inline-state is-error" role="status"><span>${escapeHtml(message)}</span>${retry ? `<button class="link-button" data-action="reload">${t("retry")}</button>` : ""}</div>`; }
+  private resourceNotice(resource: DataResource): string {
+    const error = this.dataErrors[resource];
+    if (error) {
+      const visibleResources = pageResources[this.page].filter(item => item !== "health");
+      const index = resource === "health" ? -1 : visibleResources.indexOf(resource);
+      const alreadyReported = visibleResources.slice(0, Math.max(index, 0)).some(item => this.dataErrors[item] === error);
+      return alreadyReported ? `<div class="inline-state is-muted" role="status">${t("relatedDataUnavailable")}</div>` : this.inlineError(error);
+    }
+    return this.loadingResources.has(resource) ? `<div class="inline-state" role="status"><span class="small-spinner" aria-hidden="true"></span>${t("loading")}</div>` : "";
+  }
+  private resourceNoticeFor(resources: DataResource[]): string {
+    for (const resource of resources) if (this.dataErrors[resource]) return this.resourceNotice(resource);
+    for (const resource of resources) if (this.loadingResources.has(resource)) return this.resourceNotice(resource);
+    return "";
+  }
+  private dataOrEmpty(resource: DataResource, emptyContent: string): string { return this.resourceNotice(resource) || emptyContent; }
+  private reportError(context: TranslationKey, error: unknown): string {
+    console.error(`[Safe Vision AI] ${t(context)}`, error);
+    return t(context);
+  }
+
+  private bind(): void {
+    this.root?.querySelector<HTMLSelectElement>("#language-select")?.addEventListener("change", event => {
+      language = (event.currentTarget as HTMLSelectElement).value as Language;
+      localStorage.setItem("safevision-language", language);
+      document.documentElement.lang = language;
+      this.render();
+    });
+    this.root?.querySelectorAll<HTMLElement>("[data-page]").forEach(link => link.addEventListener("click", event => {
+      event.preventDefault(); const page = link.dataset.page as Page | undefined; if (!page) return;
+      history.pushState({}, "", page === "overview" ? "/" : `/${page}`); this.page = page; this.eventDetail = null; void this.loadPage();
+    }));
+    this.root?.querySelector("#theme-toggle")?.addEventListener("click", () => this.setTheme(this.theme === "dark" ? "light" : "dark"));
+    this.root?.querySelector("#theme-select")?.addEventListener("change", event => { const choice = (event.currentTarget as HTMLSelectElement).value; if (choice === "system") { localStorage.removeItem("safevision-theme"); this.theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"; this.applyTheme(); this.render(); } else this.setTheme(choice as Theme); });
+    this.root?.querySelector("[data-action='theme-reset']")?.addEventListener("click", () => { localStorage.removeItem("safevision-theme"); this.theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"; this.applyTheme(); this.render(); });
+    this.root?.querySelector<HTMLInputElement>("#reduce-motion")?.addEventListener("change", event => {
+      this.reduceMotion = (event.currentTarget as HTMLInputElement).checked;
+      localStorage.setItem("safevision-reduce-motion", String(this.reduceMotion));
+      this.applyMotionPreference();
+      this.render();
+    });
+    this.root?.querySelector("[data-action='reload']")?.addEventListener("click", () => void this.loadPage());
+    this.root?.querySelector("[data-action='export']")?.addEventListener("click", () => this.exportCsv());
+    this.root?.querySelector("[data-action='local-logout']")?.addEventListener("click", () => {
+      sessionStorage.removeItem(LOCAL_DEV_SESSION_KEY);
+      this.localDevSession = false;
+      this.clearProtectedData();
+      if (this.root) void new AccessGate(this.root, this).start();
+    });
+    this.root?.querySelector<HTMLFormElement>("#event-filters")?.addEventListener("submit", event => { event.preventDefault(); const form = new FormData(event.currentTarget as HTMLFormElement); this.filters = { ...this.filters, q: String(form.get("q") || "") || undefined, prioridad: String(form.get("prioridad") || "") || undefined, estado: String(form.get("estado") || "") || undefined, desde: String(form.get("desde") || "") || undefined, hasta: String(form.get("hasta") || "") || undefined, offset: 0 }; void this.loadPage(); });
+    this.root?.querySelector("[data-action='previous']")?.addEventListener("click", () => { this.filters.offset = Math.max(0, Number(this.filters.offset) - Number(this.filters.limit)); void this.loadPage(); });
+    this.root?.querySelector("[data-action='next']")?.addEventListener("click", () => { this.filters.offset = Number(this.filters.offset) + Number(this.filters.limit); void this.loadPage(); });
+    this.root?.querySelectorAll<HTMLElement>("[data-event-id]").forEach(button => button.addEventListener("click", () => void this.openEvent(Number(button.dataset.eventId))));
+    this.root?.querySelectorAll<HTMLElement>("[data-review-id]").forEach(button => button.addEventListener("click", () => void this.reviewEvent(Number(button.dataset.reviewId))));
+    this.root?.querySelectorAll<HTMLElement>("[data-alert-seen]").forEach(button => button.addEventListener("click", () => void this.markSeen(Number(button.dataset.alertSeen))));
+  }
+  private setTheme(theme: Theme): void { this.theme = theme; localStorage.setItem("safevision-theme", theme); this.applyTheme(); this.render(); }
+
+  private async loadPage(): Promise<void> {
+    this.loading = true;
+    this.actionError = "";
+    this.loadingResources = new Set(pageResources[this.page]);
+    for (const resource of this.loadingResources) delete this.dataErrors[resource];
+    this.render();
+    try {
+      if (this.page === "overview") {
+        const [, metrics, recentEvents, alerts, cameras] = await Promise.all([
+          this.loadResource("health", "loadOverviewError", api.health()),
+          this.loadResource("metrics", "loadOverviewError", api.metrics()),
+          this.loadResource("recentEvents", "loadOverviewError", api.recentEvents()),
+          this.loadResource("alerts", "loadOverviewError", api.pendingAlerts()),
+          this.loadResource("cameras", "loadOverviewError", api.cameras()),
+        ]);
+        if (metrics !== undefined) this.metrics = metrics;
+        if (recentEvents !== undefined) this.recentEvents = recentEvents;
+        if (alerts !== undefined) this.alerts = alerts;
+        if (cameras !== undefined) this.cameras = cameras;
+      } else if (this.page === "cameras") {
+        const cameras = await this.loadResource("cameras", "loadCamerasError", api.cameras());
+        if (cameras !== undefined) this.cameras = cameras;
+      } else if (this.page === "events") {
+        const events = await this.loadResource("events", "loadEventsError", api.events(this.filters));
+        if (events !== undefined) this.events = events;
+      } else if (this.page === "alerts") {
+        const alerts = await this.loadResource("alerts", "loadAlertsError", api.pendingAlerts(100));
+        if (alerts !== undefined) this.alerts = alerts;
+      } else if (this.page === "subjects") {
+        const subjects = await this.loadResource("subjects", "loadSubjectsError", api.subjects());
+        if (subjects !== undefined) this.subjects = subjects;
+      } else if (this.page === "locations") {
+        const [locations, zones] = await Promise.all([
+          this.loadResource("locations", "loadLocationsError", api.locations()),
+          this.loadResource("zones", "loadLocationsError", api.zones()),
+        ]);
+        if (locations !== undefined) this.locations = locations;
+        if (zones !== undefined) this.zones = zones;
+      } else if (this.page === "settings") {
+        const eventTypes = await this.loadResource("eventTypes", "loadSettingsError", api.eventTypes());
+        if (eventTypes !== undefined) this.eventTypes = eventTypes;
+      }
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401 && this.root) {
+        this.authStatus = t("sessionExpired");
+        this.clearProtectedData();
+        this.loading = false;
+        await new AccessGate(this.root, this).start();
+        return;
+      }
+      const resource = pageResources[this.page].find(item => item !== "health") ?? "health";
+      const context: Record<DataResource, TranslationKey> = { health: "loadOverviewError", metrics: "loadOverviewError", recentEvents: "loadOverviewError", alerts: "loadAlertsError", cameras: "loadCamerasError", events: "loadEventsError", subjects: "loadSubjectsError", locations: "loadLocationsError", zones: "loadLocationsError", eventTypes: "loadSettingsError" };
+      this.dataErrors[resource] = this.reportError(context[resource], error);
+    }
+    finally { this.loading = false; this.loadingResources.clear(); this.render(); }
+  }
+  private async loadResource<T>(resource: DataResource, context: TranslationKey, request: Promise<T>): Promise<T | undefined> {
+    try { return await request; }
+    catch (error) {
+      if (error instanceof ApiError && error.status === 401) throw error;
+      const message = this.reportError(context, error);
+      if (resource !== "health") this.dataErrors[resource] = message;
+      return undefined;
+    }
+  }
+  private clearProtectedData(): void {
+    this.metrics = null; this.recentEvents = []; this.events = []; this.alerts = []; this.cameras = []; this.subjects = []; this.locations = []; this.zones = [];
+    this.dataErrors = {}; this.loadingResources.clear();
+  }
+  private async openEvent(id: number): Promise<void> {
+    try { this.eventDetail = await api.event(id); this.showEventDialog(this.eventDetail); }
+    catch (error) { this.actionError = this.reportError("openEventError", error); this.render(); }
+  }
+  private showEventDialog(event: RiskEvent): void {
+    const dialog = document.createElement("dialog"); dialog.className = "detail-dialog";
+    const fields: Array<[TranslationKey, unknown]> = [["description", event.description], ["date", formatDate(event.date, language)], ["time", `${event.time} (${t("sourceTime")})`], ["risk", event.priority], ["eventStatus", event.status], ["location", event.location], ["camera", event.camera], ["subject", event.subject]];
+    dialog.innerHTML = `<form method="dialog"><button class="dialog-close" aria-label="${t("close")}">×</button></form><span class="eyebrow">${t("eventDetail")} ${formatNumber(event.id, language)}</span><h2>${escapeHtml(event.type)}</h2><dl>${fields.map(([key, value]) => `<div><dt>${t(key)}</dt><dd>${escapeHtml(value || t("noDescriptionValue"))}</dd></div>`).join("")}</dl>${event.status === "Pendiente" ? `<button class="button primary" data-review-id="${event.id}">${t("markReviewed")}</button>` : ""}`;
+    this.root?.append(dialog); dialog.showModal(); dialog.addEventListener("close", () => dialog.remove());
+    dialog.querySelector("[data-review-id]")?.addEventListener("click", () => void this.reviewEvent(event.id));
+  }
+  private async reviewEvent(id: number): Promise<void> {
+    try { await api.reviewEvent(id); this.actionError = ""; await this.loadPage(); }
+    catch (error) { this.actionError = this.reportError("reviewEventError", error); this.render(); }
+  }
+  private async markSeen(id: number): Promise<void> {
+    try { await api.markAlertSeen(id); this.actionError = ""; await this.loadPage(); }
+    catch (error) { this.actionError = this.reportError("markAlertSeenError", error); this.render(); }
+  }
+  private exportCsv(): void {
+    if (!this.events.length) return;
+    const rows = [[t("csvAppliedFilters"), t("csvSearch"), this.filters.q ?? "", t("csvPriority"), this.filters.prioridad ?? t("csvAll"), t("csvStatus"), this.filters.estado ?? t("csvAllStatuses"), t("csvStart"), this.filters.desde ?? "", t("csvEnd"), this.filters.hasta ?? ""], [t("csvId"), t("csvEvent"), t("csvDate"), t("csvTimeSource"), t("csvRisk"), t("csvStatus"), t("csvLocation"), t("csvCamera"), t("csvSubject"), t("csvDescription")], ...this.events.map(e => [e.id, e.type, e.date, e.time, e.priority, e.status, e.location, e.camera, e.subject, e.description ?? ""])];
+    const csv = rows.map(row => row.map(value => `"${String(value).replace(/"/g, '""')}"`).join(",")).join("\r\n");
+    const blob = new Blob(["\uFEFF", csv], { type: "text/csv;charset=utf-8" }); const url = URL.createObjectURL(blob);
+    const a = document.createElement("a"); a.href = url; a.download = `safevision-${t("csvFilename")}-${new Date().toISOString().slice(0, 10)}.csv`; a.click(); URL.revokeObjectURL(url);
   }
 }
 
-class SafeVisionDashboard {
-  private readonly events: RiskEvent[] = [
-    new RiskEvent(
-      1048, "Posible caída", "Individuo 01",
-      "Zona de monitoreo A", "10:42:18", "Alto", "Pendiente"
-    ),
-    new RiskEvent(
-      1047, "Inmovilidad prolongada", "Individuo 02",
-      "Zona de monitoreo B", "10:35:06", "Medio", "Pendiente"
-    ),
-    new RiskEvent(
-      1046, "Cambio de postura", "Individuo 01",
-      "Zona de monitoreo A", "10:21:44", "Bajo", "Revisado"
-    ),
-    new RiskEvent(
-      1045, "Posible caída", "Individuo 03",
-      "Zona de monitoreo C", "09:58:12", "Alto", "Revisado"
-    ),
-    new RiskEvent(
-      1044, "Movimiento inusual", "Individuo 02",
-      "Zona de monitoreo B", "09:42:30", "Medio", "Revisado"
-    )
-  ];
-
-  private searchTerm = "";
-  private priorityFilter = "Todas";
-
-  public render(): void {
-    const app = document.querySelector<HTMLDivElement>("#app");
-
-    if (!app) {
-      throw new Error("The application root #app was not found.");
-    }
-
-    app.innerHTML = this.getTemplate();
-    this.bindEvents();
-    this.renderEvents();
-    this.renderAlerts();
-    this.updateMetrics();
-  }
-
-  private getTemplate(): string {
-    return `
-      <div class="app-shell" id="overview">
-        <aside class="sidebar">
-          <div class="brand">
-            <div class="brand-mark">SV</div>
-            <div>
-              <strong>SafeVision <span class="brand-ai">AI</span></strong>
-              <small>INTELLIGENT MONITORING</small>
-            </div>
-          </div>
-
-          <p class="side-label">PLATAFORMA</p>
-
-          <nav class="nav-menu" aria-label="Navegación principal">
-            <button class="nav-item active" data-page="overview">
-              <span>◫</span> Panel principal
-            </button>
-            <button class="nav-item" data-page="camera">
-              <span>▣</span> Monitoreo de cámara
-            </button>
-            <button class="nav-item" data-page="history">
-              <span>◷</span> Eventos e historial
-              <span class="nav-count" id="nav-alert-count">2</span>
-            </button>
-            <button class="nav-item" data-page="team">
-              <span>♙</span> Equipo del proyecto
-            </button>
-          </nav>
-
-          <p class="side-label system-label">ESTADO DEL SISTEMA</p>
-
-          <div class="system-card">
-            <span class="status-dot"></span>
-            <div>
-              <strong>Interfaz operativa</strong>
-              <small>Modo de demostración</small>
-            </div>
-          </div>
-
-          <div class="sidebar-bottom">
-            <div class="user-avatar">SV</div>
-            <div class="user-info">
-              <strong>SafeVision AI</strong>
-              <small>Panel de administración</small>
-            </div>
-            <span class="user-menu">···</span>
-          </div>
-        </aside>
-
-        <main class="main-content">
-          <header class="topbar">
-            <div class="breadcrumbs">
-              SafeVision AI <span>/</span>
-              <strong id="breadcrumb-current">Panel principal</strong>
-            </div>
-
-            <div class="topbar-right">
-              <div class="environment">
-                <span class="status-dot"></span>
-                Entorno de demostración
-              </div>
-              <div class="top-avatar">SV</div>
-            </div>
-          </header>
-
-          <div class="page-content">
-            <section class="welcome-row">
-              <div>
-                <div class="eyebrow">
-                  <span class="eyebrow-line"></span>
-                  VISIÓN ARTIFICIAL · PREVENCIÓN
-                </div>
-                <h1 id="page-title">Centro de monitoreo</h1>
-                <p class="page-subtitle">
-                  Una visión clara de los eventos, las alertas y el estado
-                  general del sistema SafeVision AI.
-                </p>
-              </div>
-
-              <button class="btn-secondary" id="refresh-button">
-                <span>↻</span> Actualizar panel
-              </button>
-            </section>
-
-            <div class="demo-notice">
-              <span class="notice-icon">i</span>
-              <div>
-                <strong>Versión de demostración.</strong>
-                Los eventos son datos de ejemplo. La cámara, el backend
-                Python y la base de datos aún deben conectarse para mostrar
-                información real.
-              </div>
-              <span class="demo-tag">DEMO</span>
-            </div>
-
-            <section class="metrics-grid" aria-label="Resumen de indicadores">
-              <article class="metric-card">
-                <div class="metric-top">
-                  <span>Eventos registrados</span>
-                  <span class="metric-icon purple">⌁</span>
-                </div>
-                <div class="metric-value" id="metric-total">05</div>
-                <div class="metric-foot">
-                  <span class="metric-neutral">Historial de ejemplo</span>
-                  <span class="metric-caption">TOTAL</span>
-                </div>
-              </article>
-
-              <article class="metric-card">
-                <div class="metric-top">
-                  <span>Alertas pendientes</span>
-                  <span class="metric-icon red">!</span>
-                </div>
-                <div class="metric-value" id="metric-pending">02</div>
-                <div class="metric-foot">
-                  <span class="metric-warning">Requieren revisión</span>
-                  <span class="metric-caption">PENDIENTES</span>
-                </div>
-              </article>
-
-              <article class="metric-card">
-                <div class="metric-top">
-                  <span>Eventos de prioridad alta</span>
-                  <span class="metric-icon orange">△</span>
-                </div>
-                <div class="metric-value" id="metric-high">02</div>
-                <div class="metric-foot">
-                  <span class="metric-warning">Datos de demostración</span>
-                  <span class="metric-caption">PRIORIDAD</span>
-                </div>
-              </article>
-
-              <article class="metric-card">
-                <div class="metric-top">
-                  <span>Estado de plataforma</span>
-                  <span class="metric-icon green">✓</span>
-                </div>
-                <div class="metric-value metric-online">Activa</div>
-                <div class="metric-foot">
-                  <span class="metric-success">Frontend disponible</span>
-                  <span class="metric-caption">LOCAL</span>
-                </div>
-              </article>
-            </section>
-
-            <section class="section-grid">
-              <article class="panel" id="camera">
-                <div class="panel-heading">
-                  <div>
-                    <h2>Vista de monitoreo</h2>
-                    <p>Vista preparada para integrar el flujo de vídeo.</p>
-                  </div>
-                  <span class="status-pill status-neutral">
-                    <span class="status-dot"></span> Sin conexión
-                  </span>
-                </div>
-
-                <div class="camera-preview">
-                  <div class="camera-grid"></div>
-                  <span class="camera-label">CÁMARA 01 · Tapo C110</span>
-                  <span class="camera-live"><span></span> VÍDEO NO DISPONIBLE</span>
-
-                  <div class="camera-center">
-                    <div class="camera-symbol">▣</div>
-                    <strong>Vista de cámara</strong>
-                    <span>
-                      El espacio de vídeo está preparado. La transmisión
-                      aparecerá cuando se integre el backend.
-                    </span>
-                  </div>
-                </div>
-
-                <div class="camera-footer">
-                  <div>
-                    <span class="footer-label">DISPOSITIVO</span>
-                    <strong>TP-Link Tapo C110</strong>
-                  </div>
-                  <div>
-                    <span class="footer-label">TRANSMISIÓN</span>
-                    <strong class="muted-text">Pendiente de integración</strong>
-                  </div>
-                  <div>
-                    <span class="footer-label">MOTOR DE IA</span>
-                    <strong class="muted-text">No conectado</strong>
-                  </div>
-                </div>
-              </article>
-
-              <article class="panel" id="alerts-panel">
-                <div class="panel-heading">
-                  <div>
-                    <h2>Alertas recientes</h2>
-                    <p>Eventos de ejemplo que requieren revisión.</p>
-                  </div>
-                  <span class="counter-badge" id="alert-counter">02</span>
-                </div>
-
-                <div class="alert-list" id="alert-list"></div>
-
-                <div class="panel-bottom">
-                  <span id="alert-footer">Alertas pendientes de revisión</span>
-                  <button class="text-button" data-page="history">
-                    Ver historial →
-                  </button>
-                </div>
-              </article>
-            </section>
-
-            <section class="panel history-panel" id="history">
-              <div class="panel-heading history-heading">
-                <div>
-                  <h2>Registro de eventos</h2>
-                  <p>Consulta, filtra y administra los eventos de demostración.</p>
-                </div>
-
-                <div class="history-actions">
-                  <label class="search-box">
-                    <span>⌕</span>
-                    <input
-                      id="event-search"
-                      type="search"
-                      placeholder="Buscar evento..."
-                      aria-label="Buscar eventos"
-                    />
-                  </label>
-
-                  <select id="priority-filter" aria-label="Filtrar por prioridad">
-                    <option value="Todas">Todas las prioridades</option>
-                    <option value="Alto">Prioridad alta</option>
-                    <option value="Medio">Prioridad media</option>
-                    <option value="Bajo">Prioridad baja</option>
-                  </select>
-
-                  <button class="btn-secondary" id="export-button">
-                    <span>↓</span> Exportar CSV
-                  </button>
-                </div>
-              </div>
-
-              <div class="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>EVENTO</th>
-                      <th>IDENTIFICADOR</th>
-                      <th>UBICACIÓN</th>
-                      <th>HORA</th>
-                      <th>PRIORIDAD</th>
-                      <th>ESTADO</th>
-                      <th>ACCIÓN</th>
-                    </tr>
-                  </thead>
-                  <tbody id="event-table-body"></tbody>
-                </table>
-              </div>
-
-              <div class="table-footer">
-                <span id="table-count">Mostrando 5 eventos</span>
-                <span>Fuente: <strong>datos de demostración</strong></span>
-              </div>
-            </section>
-
-            <section class="team-section" id="team">
-              <div>
-                <div class="eyebrow">
-                  <span class="eyebrow-line"></span>
-                  DESARROLLO ACADÉMICO
-                </div>
-                <h2>Equipo del proyecto</h2>
-                <p>
-                  SafeVision AI · Sistema inteligente para la detección
-                  de eventos de riesgo mediante visión artificial.
-                </p>
-              </div>
-
-              <div class="team-members">
-                <div class="team-member">
-                  <div class="member-avatar">I1</div>
-                  <div>
-                    <strong>Luisa Parra</strong>
-                    <small>Equipo de desarrollo</small>
-                  </div>
-                </div>
-                <div class="team-member">
-                  <div class="member-avatar">I2</div>
-                  <div>
-                    <strong>Shary Velasquez </strong>
-                    <small>Equipo de desarrollo</small>
-                  </div>
-                </div>
-                <div class="team-member">
-                  <div class="member-avatar">I3</div>
-                  <div>
-                    <strong>Luis Jamioy </strong>
-                    <small>Equipo de desarrollo</small>
-                  </div>
-                </div>
-              </div>
-            </section>
-
-            <footer class="app-footer">
-              <span>© 2026 SafeVision AI </span>
-            </footer>
-          </div>
-        </main>
-      </div>
-    `;
-  }
-
-  private bindEvents(): void {
-    document.querySelectorAll<HTMLButtonElement>("[data-page]").forEach(button => {
-      button.addEventListener("click", () => {
-        const page = button.dataset.page;
-
-        if (!page) return;
-
-        document.querySelectorAll(".nav-item").forEach(item => {
-          item.classList.toggle("active", item.getAttribute("data-page") === page);
-        });
-
-        const labels: Record<string, string> = {
-          overview: "Panel principal",
-          camera: "Monitoreo de cámara",
-          history: "Eventos e historial",
-          team: "Equipo del proyecto"
-        };
-
-        const breadcrumb = document.querySelector<HTMLElement>("#breadcrumb-current");
-        if (breadcrumb) breadcrumb.textContent = labels[page] ?? "Panel principal";
-
-        const section = document.getElementById(page);
-        section?.scrollIntoView({ behavior: "smooth", block: "start" });
-      });
-    });
-
-    document.querySelector("#event-search")?.addEventListener("input", event => {
-      this.searchTerm = (event.target as HTMLInputElement).value.toLowerCase().trim();
-      this.renderEvents();
-    });
-
-    document.querySelector("#priority-filter")?.addEventListener("change", event => {
-      this.priorityFilter = (event.target as HTMLSelectElement).value;
-      this.renderEvents();
-    });
-
-    document.querySelector("#event-table-body")?.addEventListener("click", event => {
-      const target = event.target as HTMLElement;
-      const button = target.closest<HTMLButtonElement>("[data-review-id]");
-
-      if (!button) return;
-
-      const id = Number(button.dataset.reviewId);
-      const selectedEvent = this.events.find(item => item.id === id);
-
-      if (selectedEvent) {
-        selectedEvent.status = "Revisado";
-        this.renderEvents();
-        this.renderAlerts();
-        this.updateMetrics();
-      }
-    });
-
-    document.querySelector("#alert-list")?.addEventListener("click", event => {
-      const target = event.target as HTMLElement;
-      const button = target.closest<HTMLButtonElement>("[data-review-alert]");
-
-      if (!button) return;
-
-      const id = Number(button.dataset.reviewAlert);
-      const selectedEvent = this.events.find(item => item.id === id);
-
-      if (selectedEvent) {
-        selectedEvent.status = "Revisado";
-        this.renderEvents();
-        this.renderAlerts();
-        this.updateMetrics();
-      }
-    });
-
-    document.querySelector("#refresh-button")?.addEventListener("click", () => {
-      this.renderEvents();
-      this.renderAlerts();
-      this.updateMetrics();
-
-      const button = document.querySelector<HTMLButtonElement>("#refresh-button");
-      if (button) {
-        button.innerHTML = "<span>✓</span> Panel actualizado";
-        window.setTimeout(() => {
-          button.innerHTML = "<span>↻</span> Actualizar panel";
-        }, 1500);
-      }
-    });
-
-    document.querySelector("#export-button")?.addEventListener("click", () => {
-      this.exportEvents();
-    });
-  }
-
-  private renderEvents(): void {
-    const tbody = document.querySelector<HTMLTableSectionElement>("#event-table-body");
-    if (!tbody) return;
-
-    const filtered = this.events.filter(item => {
-      const matchesSearch = [
-        item.type, item.subject, item.location, String(item.id)
-      ].some(value => value.toLowerCase().includes(this.searchTerm));
-
-      const matchesPriority =
-        this.priorityFilter === "Todas" || item.priority === this.priorityFilter;
-
-      return matchesSearch && matchesPriority;
-    });
-
-    if (filtered.length === 0) {
-      tbody.innerHTML = `
-        <tr><td colspan="7" class="no-results">
-          No se encontraron eventos con esos criterios.
-        </td></tr>
-      `;
-    } else {
-      tbody.innerHTML = filtered.map(item => `
-        <tr>
-          <td>
-            <span class="event-name">
-              <span class="event-dot ${item.priorityClass}"></span>
-              ${this.escapeHtml(item.type)}
-            </span>
-          </td>
-          <td>${this.escapeHtml(item.subject)}</td>
-          <td>${this.escapeHtml(item.location)}</td>
-          <td class="time-cell">${this.escapeHtml(item.time)}</td>
-          <td>
-            <span class="priority priority-${item.priorityClass}">
-              ${item.priority}
-            </span>
-          </td>
-          <td>
-            <span class="event-status ${item.statusClass}">
-              ${item.status}
-            </span>
-          </td>
-          <td>
-            ${item.status === "Pendiente"
-              ? `<button class="table-action" data-review-id="${item.id}">Revisar</button>`
-              : `<span class="done-label">✓ Revisado</span>`
-            }
-          </td>
-        </tr>
-      `).join("");
-    }
-
-    const count = document.querySelector<HTMLElement>("#table-count");
-    if (count) {
-      count.textContent = `Mostrando ${filtered.length} de ${this.events.length} eventos`;
-    }
-  }
-
-  private renderAlerts(): void {
-    const list = document.querySelector<HTMLDivElement>("#alert-list");
-    if (!list) return;
-
-    const pending = this.events.filter(item => item.status === "Pendiente");
-
-    const counter = document.querySelector<HTMLElement>("#alert-counter");
-    const navCount = document.querySelector<HTMLElement>("#nav-alert-count");
-    const footer = document.querySelector<HTMLElement>("#alert-footer");
-
-    if (counter) counter.textContent = String(pending.length).padStart(2, "0");
-    if (navCount) navCount.textContent = String(pending.length);
-    if (footer) footer.textContent = `${pending.length} alertas pendientes de revisión`;
-
-    if (pending.length === 0) {
-      list.innerHTML = `
-        <div class="empty-state">
-          <span>✓</span>
-          <strong>Todo revisado</strong>
-          <p>No hay alertas pendientes en los datos de demostración.</p>
-        </div>
-      `;
+class AccessGate {
+  private readonly root: HTMLDivElement;
+  private readonly privateApp: SafeVisionFrontend;
+  constructor(root: HTMLDivElement, privateApp: SafeVisionFrontend) { this.root = root; this.privateApp = privateApp; }
+  async start(): Promise<void> {
+    const localModeAvailable = await this.localDevModeAvailable();
+    if (localModeAvailable && sessionStorage.getItem(LOCAL_DEV_SESSION_KEY) === "active") {
+      this.privateApp.activateLocalDevSession();
+      await this.privateApp.startPrivate();
       return;
     }
-
-    list.innerHTML = pending.slice(0, 3).map(item => `
-      <div class="alert-item">
-        <span class="alert-indicator ${item.priorityClass}"></span>
-        <div class="alert-copy">
-          <strong>${this.escapeHtml(item.type)}</strong>
-          <span>${this.escapeHtml(item.subject)} · ${this.escapeHtml(item.time)}</span>
-          <small>${this.escapeHtml(item.location)} · Prioridad ${item.priority.toLowerCase()}</small>
-        </div>
-        <button
-          class="review-button"
-          data-review-alert="${item.id}"
-          aria-label="Marcar ${this.escapeHtml(item.type)} como revisado"
-          title="Marcar como revisado"
-        >✓</button>
-      </div>
-    `).join("");
-  }
-
-  private updateMetrics(): void {
-    const total = document.querySelector<HTMLElement>("#metric-total");
-    const pending = document.querySelector<HTMLElement>("#metric-pending");
-    const high = document.querySelector<HTMLElement>("#metric-high");
-
-    if (total) total.textContent = String(this.events.length).padStart(2, "0");
-    if (pending) {
-      pending.textContent = String(
-        this.events.filter(item => item.status === "Pendiente").length
-      ).padStart(2, "0");
+    if (await this.privateApp.hasValidBackendSession()) {
+      await this.privateApp.startPrivate();
+      return;
     }
-    if (high) {
-      high.textContent = String(
-        this.events.filter(item => item.priority === "Alto").length
-      ).padStart(2, "0");
-    }
-  }
-
-  private exportEvents(): void {
-    const rows = [
-      ["ID", "Evento", "Individuo", "Ubicación", "Hora", "Prioridad", "Estado"],
-      ...this.events.map(item => [
-        String(item.id), item.type, item.subject, item.location,
-        item.time, item.priority, item.status
-      ])
-    ];
-
-    const csv = rows
-      .map(row => row.map(value => `"${value.replace(/"/g, '""')}"`).join(","))
-      .join("\r\n");
-
-    const blob = new Blob(["\uFEFF" + csv], {
-      type: "text/csv;charset=utf-8;"
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    this.root.innerHTML = `<main class="access-shell"><section class="access-brand"><div class="brand-lockup">${brandLogo("login-wordmark")}</div><div class="access-copy"><h1><span>${t("introMain")}</span><em>${t("introSupport")}</em></h1></div></section><section class="access-panel"><form class="login-card" id="login-form"><h2>${t("loginTitle")}</h2><label for="login-email">${t("email")}</label><input type="email" id="login-email" name="email" autocomplete="username" aria-label="${t("email")}" required><label for="login-password">${t("password")}</label><div class="password-field"><input type="password" id="login-password" name="password" autocomplete="current-password" aria-label="${t("password")}" required><button type="button" id="toggle-password" aria-label="${t("showPassword")}">${t("show")}</button></div><div class="auth-message" role="alert">${escapeHtml(this.privateApp.authenticationStatus)}</div><button class="button primary" type="submit" ${localModeAvailable ? "" : "disabled"}>${t("loginTitle")}</button><div class="auth-options"><button type="button" data-auth-info="registration">${t("createAccount")}</button><button type="button" data-auth-info="recovery">${t("forgotPassword")}</button></div></form><footer>${t("loginBrandFooter")}</footer></section></main>`;
+    if (!reduceMotion) this.root.querySelector(".brand-lockup")?.classList.add("intro");
+    this.root.querySelector<HTMLFormElement>("#login-form")?.addEventListener("submit", async event => {
+      event.preventDefault();
+      const message = this.root.querySelector<HTMLElement>(".auth-message");
+      const email = this.root.querySelector<HTMLInputElement>("#login-email");
+      const password = this.root.querySelector<HTMLInputElement>("#login-password");
+      if (!email || !password || !email.validity.valid || !password.value) { if (message) message.textContent = t("invalidEmailPassword"); return; }
+      if (!localModeAvailable) { if (message) message.textContent = t("accessUnavailable"); return; }
+      try {
+        const localAuth = await import("@safevision/local-dev-access");
+        if (!localAuth.verifyLocalDevCredentials(email.value, password.value)) { if (message) message.textContent = t("invalidCredentials"); return; }
+        sessionStorage.setItem(LOCAL_DEV_SESSION_KEY, "active");
+        this.privateApp.activateLocalDevSession();
+        await this.privateApp.startPrivate();
+      } catch { if (message) message.textContent = t("localModuleFailed"); }
     });
-
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = "safevision-events.csv";
-    link.click();
-    URL.revokeObjectURL(url);
+    this.root.querySelector("#toggle-password")?.addEventListener("click", event => { const input = this.root.querySelector<HTMLInputElement>("#login-password"); const button = event.currentTarget as HTMLButtonElement; if (!input) return; input.type = input.type === "password" ? "text" : "password"; button.textContent = input.type === "password" ? t("show") : t("hide"); button.setAttribute("aria-label", input.type === "password" ? t("showPassword") : t("hidePassword")); });
+    this.root.querySelectorAll<HTMLElement>("[data-auth-info]").forEach(button => button.addEventListener("click", () => { const message = this.root.querySelector<HTMLElement>(".auth-message"); if (message) message.textContent = t(button.dataset.authInfo === "registration" ? "registrationUnavailable" : "recoveryUnavailable"); }));
   }
-
-  private escapeHtml(value: string): string {
-    return value.replace(/[&<>"']/g, character => {
-      const entities: Record<string, string> = {
-        "&": "&amp;",
-        "<": "&lt;",
-        ">": "&gt;",
-        '"': "&quot;",
-        "'": "&#39;"
-      };
-
-      return entities[character];
-    });
+  private async localDevModeAvailable(): Promise<boolean> {
+    if (!isLocalhost()) return false;
+    try {
+      const localAuth = await import("@safevision/local-dev-access");
+      return localAuth.readLocalDevCredentials() !== null;
+    } catch { return false; }
   }
 }
 
-new SafeVisionDashboard().render();
+async function bootstrap(): Promise<void> {
+  const root = document.querySelector<HTMLDivElement>("#app");
+  if (!root) throw new Error("No se encontró el contenedor principal de Safe Vision AI.");
+  const privateApp = new SafeVisionFrontend();
+  document.documentElement.lang = language;
+  privateApp.initializeTheme();
+  await showIntroduction(root);
+  const gate = new AccessGate(root, privateApp);
+  await gate.start();
+}
+
+async function showIntroduction(root: HTMLDivElement): Promise<void> {
+  root.innerHTML = `<main class="intro-screen" aria-label="Safe Vision AI">${brandLogo("intro-wordmark")}</main>`;
+  const screen = root.querySelector<HTMLElement>(".intro-screen");
+  const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches || localStorage.getItem("safevision-reduce-motion") === "true";
+  await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => { screen?.classList.add("is-entering"); resolve(); })));
+  await new Promise(resolve => window.setTimeout(resolve, reducedMotion ? 180 : 680));
+  screen?.classList.add("is-leaving");
+  if (!reducedMotion) await new Promise(resolve => window.setTimeout(resolve, 220));
+}
+
+void bootstrap();
