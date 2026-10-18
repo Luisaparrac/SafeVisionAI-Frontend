@@ -1,6 +1,7 @@
 import "./style.css";
 import { formatDate, formatNumber, getStoredLanguage, translate, type Language, type TranslationKey } from "./i18n";
 import { loadAllEvents } from "./eventExport";
+import { serializeCsvRows } from "./eventCsv";
 import {
   ApiError,
   SafeVisionApi,
@@ -376,8 +377,8 @@ class SafeVisionFrontend {
       const events = await loadAllEvents(pageFilters => api.events(pageFilters), filters);
       if (!events.length) { this.actionError = t("noEventsToExport"); return; }
       const rows = [[t("csvAppliedFilters"), t("csvSearch"), filters.q ?? "", t("csvPriority"), filters.prioridad ?? t("csvAll"), t("csvStatus"), filters.estado ?? t("csvAllStatuses"), t("csvStart"), filters.desde ?? "", t("csvEnd"), filters.hasta ?? "", t("csvCamera"), filters.camara_id ?? ""], [t("csvId"), t("csvEvent"), t("csvDate"), t("csvTimeSource"), t("csvRisk"), t("csvStatus"), t("csvLocation"), t("csvCamera"), t("csvSubject"), t("csvDescription")], ...events.map(e => [e.id, e.type, e.date, e.time, e.priority, e.status, e.location, e.camera, e.subject, e.description ?? ""])];
-      const csv = rows.map(row => row.map(value => `"${String(value).replace(/"/g, '""')}"`).join(",")).join("\r\n");
-      const blob = new Blob(["\uFEFF", csv], { type: "text/csv;charset=utf-8" }); const url = URL.createObjectURL(blob);
+      const csv = serializeCsvRows(rows);
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8" }); const url = URL.createObjectURL(blob);
       const a = document.createElement("a"); a.href = url; a.download = `safevision-${t("csvFilename")}-${new Date().toISOString().slice(0, 10)}.csv`; a.click(); URL.revokeObjectURL(url);
     } catch (error) {
       this.actionError = this.reportError("exportEventsError", error);

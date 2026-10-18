@@ -5,6 +5,7 @@ import { createServer } from "vite";
 let server;
 let apiModule;
 let eventExportModule;
+let eventCsvModule;
 let originalFetch;
 
 before(async () => {
@@ -15,6 +16,7 @@ before(async () => {
   });
   apiModule = await server.ssrLoadModule("/src/api.ts");
   eventExportModule = await server.ssrLoadModule("/src/eventExport.ts");
+  eventCsvModule = await server.ssrLoadModule("/src/eventCsv.ts");
   originalFetch = globalThis.fetch;
 });
 
@@ -122,4 +124,14 @@ test("CSV export pagination enforces the API maximum", async () => {
     eventExportModule.loadAllEvents(async () => [], {}, 501),
     RangeError,
   );
+});
+
+test("CSV serialization escapes quotes and neutralizes spreadsheet formulas", () => {
+  const csv = eventCsvModule.serializeCsvRows([
+    ["description", "value"],
+    ['Camera "north", entry', "=HYPERLINK(\"https://example.test\")"],
+    ["  +cmd", "@SUM(1,2)"],
+  ]);
+
+  assert.equal(csv, '\uFEFF"description","value"\r\n"Camera ""north"", entry","\'=HYPERLINK(""https://example.test"")"\r\n"\'  +cmd","\'@SUM(1,2)"');
 });
