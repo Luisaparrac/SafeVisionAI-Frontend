@@ -31,13 +31,14 @@ test("events sends supported filters and includes credentials", async () => {
   };
 
   const api = new apiModule.SafeVisionApi();
-  const events = await api.events({ q: "door", prioridad: "Alto", desde: "2026-01-01", limit: 50, offset: 0 });
+  const events = await api.events({ q: "door", prioridad: "Alto", desde: "2026-01-01", camara_id: 7, limit: 50, offset: 0 });
 
   const url = new URL(requestedUrl);
   assert.equal(url.pathname, "/api/eventos");
   assert.equal(url.searchParams.get("q"), "door");
   assert.equal(url.searchParams.get("prioridad"), "Alto");
   assert.equal(url.searchParams.get("desde"), "2026-01-01");
+  assert.equal(url.searchParams.get("camara_id"), "7");
   assert.equal(url.searchParams.get("limit"), "50");
   assert.equal(url.searchParams.get("offset"), "0");
   assert.equal(url.searchParams.has("estado"), false);
@@ -69,5 +70,19 @@ test("HTTP errors preserve the response detail and status", async () => {
   await assert.rejects(
     new apiModule.SafeVisionApi().metrics(),
     error => error instanceof apiModule.ApiError && error.status === 403 && error.message === "forbidden",
+  );
+});
+
+test("FastAPI validation errors include field paths and messages", async () => {
+  globalThis.fetch = async () => new Response(JSON.stringify({ detail: [
+    { loc: ["query", "camara_id"], msg: "Input should be a valid integer" },
+    { loc: ["query", "limit"], msg: "Input should be greater than or equal to 1" },
+  ] }), { status: 422, headers: { "Content-Type": "application/json" } });
+
+  await assert.rejects(
+    new apiModule.SafeVisionApi().metrics(),
+    error => error instanceof apiModule.ApiError
+      && error.status === 422
+      && error.message === "query.camara_id: Input should be a valid integer; query.limit: Input should be greater than or equal to 1",
   );
 });

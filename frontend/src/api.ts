@@ -106,6 +106,18 @@ export class SafeVisionApi {
       try {
         const body = await response.json() as { detail?: unknown; message?: unknown };
         if (typeof body.detail === "string") message = body.detail;
+        else if (Array.isArray(body.detail)) {
+          const details = body.detail.flatMap((item: unknown) => {
+            if (!item || typeof item !== "object") return [];
+            const validation = item as { loc?: unknown; msg?: unknown };
+            if (typeof validation.msg !== "string") return [];
+            const location = Array.isArray(validation.loc)
+              ? validation.loc.filter((part: unknown) => typeof part === "string" || typeof part === "number").join(".")
+              : "";
+            return [location ? `${location}: ${validation.msg}` : validation.msg];
+          });
+          if (details.length) message = details.join("; ");
+        }
         else if (typeof body.message === "string") message = body.message;
       } catch { /* The status still gives a useful error when the body is empty. */ }
       throw new ApiError(response.status, message);
