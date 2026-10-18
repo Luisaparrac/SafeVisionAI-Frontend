@@ -1,5 +1,6 @@
 import "./style.css";
 import { formatDate, formatNumber, getStoredLanguage, translate, type Language, type TranslationKey } from "./i18n";
+import { loadAllEvents } from "./eventExport";
 import {
   ApiError,
   SafeVisionApi,
@@ -58,6 +59,7 @@ class SafeVisionFrontend {
   private localDevSession = false;
   private loading = false;
   private actionError = "";
+  private exportingCsv = false;
   private dataErrors: Partial<Record<DataResource, string>> = {};
   private loadingResources = new Set<DataResource>();
   private metrics: Metrics | null = null;
@@ -178,7 +180,7 @@ class SafeVisionFrontend {
     return `${this.pageHeading("camerasTitle", "camerasSubtitle")}<div class="monitor-layout"><section class="panel monitor-player-card"><div class="video-player" role="img" aria-label="${t("videoPlayer")}">${playerState}<div class="player-controls"><button type="button" disabled aria-label="${t("playbackUnavailable")}">▶</button><span>--:--</span><div class="player-track" aria-hidden="true"><i></i></div><span>--:--</span></div></div><div class="camera-info monitor-info"><div><h2>${selected ? escapeHtml(selected.name) : t("camera")}</h2><p>${selected ? `${t("camera")} ${formatNumber(selected.camera_id, language)} · ${t("location")} ${formatNumber(selected.location_id, language)}` : t("noCameraSelected")}</p></div><span class="state-tag">${selected ? escapeHtml(selected.status) : t("noData")}</span>${selected ? `<small>${t("cameraAddress")}: ${escapeHtml(selected.ip_address)}</small>` : ""}</div></section><aside class="panel camera-list"><div class="panel-title"><div><h2>${t("availableCameras")}</h2></div></div>${cameraCards}</aside></div>`;
   }
   private eventsView(): string {
-    const action = `<button class="button secondary" data-action="export" ${this.events.length ? "" : "disabled"}>${t("exportCsv")}</button>`;
+    const action = `<button class="button secondary" data-action="export" ${this.events.length && !this.exportingCsv ? "" : "disabled"} aria-busy="${this.exportingCsv}">${t(this.exportingCsv ? "preparingCsv" : "exportCsv")}</button>`;
     const priorities: Array<[string, TranslationKey]> = [["Alto", "high"], ["Medio", "medium"], ["Bajo", "low"]];
     const statuses: Array<[string, TranslationKey]> = [["Pendiente", "pending"], ["Revisado", "reviewed"]];
     return `${this.pageHeading("eventsTitle", "eventsSubtitle", action)}<form class="filter-bar" id="event-filters"><label>${t("search")}<input name="q" value="${escapeHtml(this.filters.q ?? "")}" placeholder="${t("searchPlaceholder")}"></label><label>${t("priority")}<select name="prioridad"><option value="">${t("all")}</option>${priorities.map(([value, key]) => `<option value="${value}" ${this.filters.prioridad === value ? "selected" : ""}>${t(key)}</option>`).join("")}</select></label><label>${t("status")}<select name="estado"><option value="">${t("allStatuses")}</option>${statuses.map(([value, key]) => `<option value="${value}" ${this.filters.estado === value ? "selected" : ""}>${t(key)}</option>`).join("")}</select></label><label>${t("camera")}<select name="camara_id"><option value="">${t("allCameras")}</option>${this.cameras.map(camera => `<option value="${camera.camera_id}" ${this.filters.camara_id === camera.camera_id ? "selected" : ""}>${escapeHtml(camera.name)}</option>`).join("")}</select></label><label>${t("from")}<input type="date" name="desde" value="${escapeHtml(this.filters.desde ?? "")}"></label><label>${t("to")}<input type="date" name="hasta" value="${escapeHtml(this.filters.hasta ?? "")}"></label><button class="button primary">${t("apply")}</button></form>${this.resourceNotice("cameras")}<article class="panel table-panel">${this.eventTable(this.events, false)}</article><div class="pagination"><button class="button secondary" data-action="previous" ${!this.filters.offset ? "disabled" : ""}>${t("previous")}</button><span>${t("records")} ${formatNumber(Number(this.filters.offset ?? 0) + 1, language)}–${formatNumber(Number(this.filters.offset ?? 0) + this.events.length, language)}</span><button class="button secondary" data-action="next" ${this.events.length < Number(this.filters.limit) ? "disabled" : ""}>${t("next")}</button></div>`;
@@ -364,12 +366,25 @@ class SafeVisionFrontend {
     try { await api.markAlertSeen(id); this.actionError = ""; await this.loadPage(); }
     catch (error) { this.actionError = this.reportError("markAlertSeenError", error); this.render(); }
   }
-  private exportCsv(): void {
-    if (!this.events.length) return;
-    const rows = [[t("csvAppliedFilters"), t("csvSearch"), this.filters.q ?? "", t("csvPriority"), this.filters.prioridad ?? t("csvAll"), t("csvStatus"), this.filters.estado ?? t("csvAllStatuses"), t("csvStart"), this.filters.desde ?? "", t("csvEnd"), this.filters.hasta ?? ""], [t("csvId"), t("csvEvent"), t("csvDate"), t("csvTimeSource"), t("csvRisk"), t("csvStatus"), t("csvLocation"), t("csvCamera"), t("csvSubject"), t("csvDescription")], ...this.events.map(e => [e.id, e.type, e.date, e.time, e.priority, e.status, e.location, e.camera, e.subject, e.description ?? ""])];
-    const csv = rows.map(row => row.map(value => `"${String(value).replace(/"/g, '""')}"`).join(",")).join("\r\n");
-    const blob = new Blob(["\uFEFF", csv], { type: "text/csv;charset=utf-8" }); const url = URL.createObjectURL(blob);
-    const a = document.createElement("a"); a.href = url; a.download = `safevision-${t("csvFilename")}-${new Date().toISOString().slice(0, 10)}.csv`; a.click(); URL.revokeObjectURL(url);
+  private async exportCsv(): Promise<void> {
+    if (!this.events.length || this.exportingCsv) return;
+    const filters = { ...this.filters };
+    this.exportingCsv = true;
+    this.actionError = "";
+    this.render();
+    try {
+      const events = await loadAllEvents(pageFilters => api.events(pageFilters), filters);
+      if (!events.length) { this.actionError = t("noEventsToExport"); return; }
+      const rows = [[t("csvAppliedFilters"), t("csvSearch"), filters.q ?? "", t("csvPriority"), filters.prioridad ?? t("csvAll"), t("csvStatus"), filters.estado ?? t("csvAllStatuses"), t("csvStart"), filters.desde ?? "", t("csvEnd"), filters.hasta ?? "", t("csvCamera"), filters.camara_id ?? ""], [t("csvId"), t("csvEvent"), t("csvDate"), t("csvTimeSource"), t("csvRisk"), t("csvStatus"), t("csvLocation"), t("csvCamera"), t("csvSubject"), t("csvDescription")], ...events.map(e => [e.id, e.type, e.date, e.time, e.priority, e.status, e.location, e.camera, e.subject, e.description ?? ""])];
+      const csv = rows.map(row => row.map(value => `"${String(value).replace(/"/g, '""')}"`).join(",")).join("\r\n");
+      const blob = new Blob(["\uFEFF", csv], { type: "text/csv;charset=utf-8" }); const url = URL.createObjectURL(blob);
+      const a = document.createElement("a"); a.href = url; a.download = `safevision-${t("csvFilename")}-${new Date().toISOString().slice(0, 10)}.csv`; a.click(); URL.revokeObjectURL(url);
+    } catch (error) {
+      this.actionError = this.reportError("exportEventsError", error);
+    } finally {
+      this.exportingCsv = false;
+      this.render();
+    }
   }
 }
 

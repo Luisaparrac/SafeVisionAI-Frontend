@@ -11,7 +11,7 @@ Esta auditoría no modifica código de aplicación ni configura/despliega servic
 - No aparecen `securitySchemes` ni requisitos de seguridad declarados en OpenAPI. La protección/autorización de las rutas de datos y CORS con cookies queda **pendiente de confirmar** con backend; no debe interpretarse como que los datos deban ser públicos.
 - No se encontró contrato backend para login, sesión de usuario actual, logout, registro, verificación, OAuth Google, SMS, recuperación ni cambio de contraseña. El formulario no llama a una ruta de login. En el bundle de producción el módulo de acceso local se reemplaza por una implementación que siempre devuelve `null`/`false`; en desarrollo, el acceso local depende de `VITE_LOCAL_DEV_EMAIL` y `VITE_LOCAL_DEV_PASSWORD`, funciona únicamente en `localhost` y no autentica contra FastAPI.
 - El backend entrega metadatos y estado reportado de cámaras, pero no publica un stream reproducible por navegador ni un canal de detecciones en vivo. El reproductor se mantiene en estado no disponible; no hay integración de vídeo/IA en directo en frontend.
-- El CSV se genera en el navegador a partir de la página de eventos ya consultada; no se solicita una exportación al backend y, por tanto, contiene como máximo los eventos de esa página (por defecto, hasta 50), no necesariamente el historial completo.
+- El CSV se genera en el navegador y solicita todas las páginas de eventos con los filtros activos; no hay exportación backend ni snapshot, así que cambios concurrentes entre páginas pueden afectar la consistencia.
 
 ## Configuración y transporte HTTP
 
@@ -27,7 +27,7 @@ La especificación OpenAPI no anuncia autenticación por cookie, bearer token, C
 |---|---|---|---|---|---|
 | Salud en resumen | `GET /health` | Sin parámetros ni cuerpo | Objeto JSON de propiedades string | No declarada en OpenAPI; confirmar política de acceso | Implementada y compatible |
 | Métricas | `GET /api/metricas` | Sin parámetros ni cuerpo | `{ total: number, pendientes: number, alto: number }` | No declarada; confirmar autenticación y autorización de datos | Implementada y compatible |
-| Historial de eventos | `GET /api/eventos` | Query: `q`, `prioridad`, `estado`, `camara_id`, `desde`, `hasta`, `limit`, `offset`; sin cuerpo. La UI expone búsqueda, prioridad, estado y fechas; `camara_id` está en el cliente, no en los controles actuales. `limit` inicial 50 | Array de `EventOut`: `id`, `type`, `subject`, `location`, `camera`, `date`, `time`, `priority`, `status`, `description?` | No declarada; confirmar | Implementada y compatible |
+| Historial de eventos | `GET /api/eventos` | Query: `q`, `prioridad`, `estado`, `camara_id`, `desde`, `hasta`, `limit`, `offset`; sin cuerpo. La UI expone búsqueda, prioridad, estado, cámara y fechas; `limit` inicial 50 | Array de `EventOut`: `id`, `type`, `subject`, `location`, `camera`, `date`, `time`, `priority`, `status`, `description?` | No declarada; confirmar | Implementada y compatible |
 | Actividad reciente | `GET /api/eventos/recientes?limit=10` | `limit` (API admite 1–100); sin cuerpo | Array de `EventOut` | No declarada; confirmar | Implementada y compatible |
 | Detalle de evento | `GET /api/eventos/{event_id}` | Path `event_id` entero | Un `EventOut` | No declarada; confirmar | Implementada y compatible |
 | Revisar evento | `PATCH /api/eventos/{event_id}/revisar` | Path `event_id`; sin cuerpo | Un `EventOut`; API indica que cierra alertas del evento | No declarada; confirmar permiso de revisión | Implementada y compatible |
@@ -46,7 +46,7 @@ La especificación OpenAPI no anuncia autenticación por cookie, bearer token, C
 
 La UI presenta búsqueda libre, prioridad, estado, cámara y rango de fechas. El selector de cámara se carga desde `GET /api/camaras` y envía su `camera_id` como `camara_id`; si falla esa petición, muestra un estado de error discreto junto al filtro. El paginador envía `limit=50` y modifica `offset`; el frontend asume que `GET /api/eventos` devuelve un array directo, que coincide con OpenAPI.
 
-La exportación CSV no es una llamada API. Serializa `this.events`, aplica escape de comillas y BOM UTF-8, e incluye los filtros aplicados como metadatos. Exporta únicamente los registros cargados en la página actual; el frontend no obtiene más páginas automáticamente para generar un CSV completo.
+La exportación CSV no es una descarga del backend. Al solicitarla, el frontend repite `GET /api/eventos` con los filtros activos y páginas de hasta 500 registros (máximo documentado), hasta recibir una página menor al límite; solo descarga el archivo si todas las solicitudes terminan correctamente. Incluye los filtros como metadatos, escapa comillas y usa BOM UTF-8. La exportación puede reflejar cambios concurrentes en el historial entre páginas porque la API no documenta un snapshot.
 
 ## Autenticación y cuenta
 
@@ -89,7 +89,7 @@ No se observa persistencia de token de backend. El cliente manda `credentials: i
 - `loadResource` conserva el estado vacío por separado del error: en error registra detalle en consola y presenta mensaje localizado discreto con opción de reintento; mientras carga muestra indicador; arrays vacíos confirmados muestran estado vacío. En Resumen agrupa avisos de recursos que comparten el mismo mensaje para reducir duplicación.
 - Si una operación responde `401`, la app limpia datos protegidos y vuelve a la puerta de acceso. Hoy el backend no publica el contrato de sesión requerido para que ese ciclo funcione con autenticación real.
 - El estado de cámara deriva del texto `status` retornado. La UI marca `connected`/`conectada` como conectado; el enum del endpoint de actualización documenta `active`, `inactive`, `disconnected`, `maintenance`. Como la lista no define formalmente esos valores en OpenAPI, el mapeo entre `active` y “conectada” necesita confirmarse. La pantalla no afirma que haya stream cuando solo hay estado de inventario.
-- El alcance del CSV es local a la página visible, como se detalla arriba; no representa una exportación total salvo que se carguen todos los registros por otro medio.
+- El CSV sigue sin snapshot transaccional del servidor; puede incluir páginas consultadas en instantes distintos.
 
 ## Incompatibilidades y decisiones pendientes
 
@@ -97,7 +97,7 @@ No se observa persistencia de token de backend. El cliente manda `credentials: i
 2. **Autorización no especificada:** OpenAPI no declara controles para consultas o acciones de revisión. Backend debe declarar autenticación, permisos y comportamiento `401/403`.
 3. **Estado de cámara ambiguo:** `CameraOut.status` es string abierta, mientras que el endpoint de actualización documenta un enum en inglés. Confirmar valores observados por `GET /api/camaras` y correspondencia visual.
 4. **Sin vídeo/IA en vivo:** no hay endpoint/protocolo de streaming, ni canal de eventos en tiempo real, ni timestamps de transmisión.
-5. **CSV parcial:** se exporta solo la página actual de datos.
+5. **CSV no atómico:** la exportación recorre páginas, pero el contrato no ofrece snapshot; cambios concurrentes pueden afectar la consistencia entre páginas.
 6. **Acciones sin interfaz o contrato de rol:** `markFalseAlarm` existe en cliente y backend, pero no se ofrece como acción visible actualmente. Si se habilita, acordar permisos y resultado de conflictos `409`.
 7. **CORS y cookies:** `credentials: include` está preparado en el cliente, pero orígenes permitidos, cookies, `SameSite`, `Secure`, expiración y CSRF no se verifican ni especifican en OpenAPI.
 
@@ -141,8 +141,7 @@ No se observa persistencia de token de backend. El cliente manda `credentials: i
 
 **P2 — datos y exportación**
 
-- Decidir si se añade filtro visual por cámara (el API cliente ya modela `camara_id`).
-- Si el CSV debe ser completo, cargar todas las páginas respetando límites o consumir un endpoint de exportación documentado; mantener explícito el alcance si sigue siendo exportación de página actual.
+- Si se requiere una exportación consistente durante escrituras concurrentes, publicar un endpoint de exportación/snapshot con contrato documentado.
 - Mostrar con claridad respuestas vacías frente a errores y mantener mensajes técnicos en consola, conforme al comportamiento actual.
 
 ## Fuentes verificadas

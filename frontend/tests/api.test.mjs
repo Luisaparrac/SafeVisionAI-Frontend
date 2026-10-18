@@ -4,6 +4,7 @@ import { createServer } from "vite";
 
 let server;
 let apiModule;
+let eventExportModule;
 let originalFetch;
 
 before(async () => {
@@ -13,6 +14,7 @@ before(async () => {
     appType: "custom",
   });
   apiModule = await server.ssrLoadModule("/src/api.ts");
+  eventExportModule = await server.ssrLoadModule("/src/eventExport.ts");
   originalFetch = globalThis.fetch;
 });
 
@@ -84,5 +86,40 @@ test("FastAPI validation errors include field paths and messages", async () => {
     error => error instanceof apiModule.ApiError
       && error.status === 422
       && error.message === "query.camara_id: Input should be a valid integer; query.limit: Input should be greater than or equal to 1",
+  );
+});
+
+test("CSV export pagination preserves filters and collects every page", async () => {
+  const calls = [];
+  const fetchPage = async filters => {
+    calls.push(filters);
+    return filters.offset === 0 ? [{ id: 1 }, { id: 2 }] : [{ id: 3 }];
+  };
+
+  const events = await eventExportModule.loadAllEvents(fetchPage, { q: "door", camara_id: 7 }, 2);
+
+  assert.deepEqual(events.map(event => event.id), [1, 2, 3]);
+  assert.deepEqual(calls, [
+    { q: "door", camara_id: 7, limit: 2, offset: 0 },
+    { q: "door", camara_id: 7, limit: 2, offset: 2 },
+  ]);
+});
+
+test("CSV export fails instead of returning a partial file when a later page fails", async () => {
+  let calls = 0;
+  const fetchPage = async () => {
+    calls += 1;
+    if (calls === 1) return [{ id: 1 }, { id: 2 }];
+    throw new Error("page request failed");
+  };
+
+  await assert.rejects(eventExportModule.loadAllEvents(fetchPage, {}, 2), /page request failed/);
+  assert.equal(calls, 2);
+});
+
+test("CSV export pagination enforces the API maximum", async () => {
+  await assert.rejects(
+    eventExportModule.loadAllEvents(async () => [], {}, 501),
+    RangeError,
   );
 });
