@@ -29,7 +29,7 @@ const labels: Record<Page, TranslationKey> = {
 };
 const pageResources: Record<Page, DataResource[]> = {
   overview: ["health", "metrics", "recentEvents", "alerts", "cameras"], cameras: ["cameras"],
-  events: ["events"], alerts: ["alerts"], subjects: ["subjects"],
+  events: ["events", "cameras"], alerts: ["alerts"], subjects: ["subjects"],
   locations: ["locations", "zones"], settings: ["eventTypes"],
 };
 const icons: Record<string, string> = {
@@ -181,7 +181,7 @@ class SafeVisionFrontend {
     const action = `<button class="button secondary" data-action="export" ${this.events.length ? "" : "disabled"}>${t("exportCsv")}</button>`;
     const priorities: Array<[string, TranslationKey]> = [["Alto", "high"], ["Medio", "medium"], ["Bajo", "low"]];
     const statuses: Array<[string, TranslationKey]> = [["Pendiente", "pending"], ["Revisado", "reviewed"]];
-    return `${this.pageHeading("eventsTitle", "eventsSubtitle", action)}<form class="filter-bar" id="event-filters"><label>${t("search")}<input name="q" value="${escapeHtml(this.filters.q ?? "")}" placeholder="${t("searchPlaceholder")}"></label><label>${t("priority")}<select name="prioridad"><option value="">${t("all")}</option>${priorities.map(([value, key]) => `<option value="${value}" ${this.filters.prioridad === value ? "selected" : ""}>${t(key)}</option>`).join("")}</select></label><label>${t("status")}<select name="estado"><option value="">${t("allStatuses")}</option>${statuses.map(([value, key]) => `<option value="${value}" ${this.filters.estado === value ? "selected" : ""}>${t(key)}</option>`).join("")}</select></label><label>${t("from")}<input type="date" name="desde" value="${escapeHtml(this.filters.desde ?? "")}"></label><label>${t("to")}<input type="date" name="hasta" value="${escapeHtml(this.filters.hasta ?? "")}"></label><button class="button primary">${t("apply")}</button></form><article class="panel table-panel">${this.eventTable(this.events, false)}</article><div class="pagination"><button class="button secondary" data-action="previous" ${!this.filters.offset ? "disabled" : ""}>${t("previous")}</button><span>${t("records")} ${formatNumber(Number(this.filters.offset ?? 0) + 1, language)}–${formatNumber(Number(this.filters.offset ?? 0) + this.events.length, language)}</span><button class="button secondary" data-action="next" ${this.events.length < Number(this.filters.limit) ? "disabled" : ""}>${t("next")}</button></div>`;
+    return `${this.pageHeading("eventsTitle", "eventsSubtitle", action)}<form class="filter-bar" id="event-filters"><label>${t("search")}<input name="q" value="${escapeHtml(this.filters.q ?? "")}" placeholder="${t("searchPlaceholder")}"></label><label>${t("priority")}<select name="prioridad"><option value="">${t("all")}</option>${priorities.map(([value, key]) => `<option value="${value}" ${this.filters.prioridad === value ? "selected" : ""}>${t(key)}</option>`).join("")}</select></label><label>${t("status")}<select name="estado"><option value="">${t("allStatuses")}</option>${statuses.map(([value, key]) => `<option value="${value}" ${this.filters.estado === value ? "selected" : ""}>${t(key)}</option>`).join("")}</select></label><label>${t("camera")}<select name="camara_id"><option value="">${t("allCameras")}</option>${this.cameras.map(camera => `<option value="${camera.camera_id}" ${this.filters.camara_id === camera.camera_id ? "selected" : ""}>${escapeHtml(camera.name)}</option>`).join("")}</select></label><label>${t("from")}<input type="date" name="desde" value="${escapeHtml(this.filters.desde ?? "")}"></label><label>${t("to")}<input type="date" name="hasta" value="${escapeHtml(this.filters.hasta ?? "")}"></label><button class="button primary">${t("apply")}</button></form>${this.resourceNotice("cameras")}<article class="panel table-panel">${this.eventTable(this.events, false)}</article><div class="pagination"><button class="button secondary" data-action="previous" ${!this.filters.offset ? "disabled" : ""}>${t("previous")}</button><span>${t("records")} ${formatNumber(Number(this.filters.offset ?? 0) + 1, language)}–${formatNumber(Number(this.filters.offset ?? 0) + this.events.length, language)}</span><button class="button secondary" data-action="next" ${this.events.length < Number(this.filters.limit) ? "disabled" : ""}>${t("next")}</button></div>`;
   }
   private eventTable(events: RiskEvent[], compact: boolean): string {
     const resource: DataResource = compact ? "recentEvents" : "events";
@@ -263,7 +263,7 @@ class SafeVisionFrontend {
       this.clearProtectedData();
       if (this.root) void new AccessGate(this.root, this).start();
     });
-    this.root?.querySelector<HTMLFormElement>("#event-filters")?.addEventListener("submit", event => { event.preventDefault(); const form = new FormData(event.currentTarget as HTMLFormElement); this.filters = { ...this.filters, q: String(form.get("q") || "") || undefined, prioridad: String(form.get("prioridad") || "") || undefined, estado: String(form.get("estado") || "") || undefined, desde: String(form.get("desde") || "") || undefined, hasta: String(form.get("hasta") || "") || undefined, offset: 0 }; void this.loadPage(); });
+    this.root?.querySelector<HTMLFormElement>("#event-filters")?.addEventListener("submit", event => { event.preventDefault(); const form = new FormData(event.currentTarget as HTMLFormElement); const cameraId = String(form.get("camara_id") || ""); this.filters = { ...this.filters, q: String(form.get("q") || "") || undefined, prioridad: String(form.get("prioridad") || "") || undefined, estado: String(form.get("estado") || "") || undefined, camara_id: cameraId ? Number(cameraId) : undefined, desde: String(form.get("desde") || "") || undefined, hasta: String(form.get("hasta") || "") || undefined, offset: 0 }; void this.loadPage(); });
     this.root?.querySelector("[data-action='previous']")?.addEventListener("click", () => { this.filters.offset = Math.max(0, Number(this.filters.offset) - Number(this.filters.limit)); void this.loadPage(); });
     this.root?.querySelector("[data-action='next']")?.addEventListener("click", () => { this.filters.offset = Number(this.filters.offset) + Number(this.filters.limit); void this.loadPage(); });
     this.root?.querySelectorAll<HTMLElement>("[data-event-id]").forEach(button => button.addEventListener("click", () => void this.openEvent(Number(button.dataset.eventId))));
@@ -295,8 +295,12 @@ class SafeVisionFrontend {
         const cameras = await this.loadResource("cameras", "loadCamerasError", api.cameras());
         if (cameras !== undefined) this.cameras = cameras;
       } else if (this.page === "events") {
-        const events = await this.loadResource("events", "loadEventsError", api.events(this.filters));
+        const [events, cameras] = await Promise.all([
+          this.loadResource("events", "loadEventsError", api.events(this.filters)),
+          this.loadResource("cameras", "loadCamerasError", api.cameras()),
+        ]);
         if (events !== undefined) this.events = events;
+        if (cameras !== undefined) this.cameras = cameras;
       } else if (this.page === "alerts") {
         const alerts = await this.loadResource("alerts", "loadAlertsError", api.pendingAlerts(100));
         if (alerts !== undefined) this.alerts = alerts;

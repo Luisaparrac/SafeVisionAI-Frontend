@@ -44,7 +44,7 @@ La especificación OpenAPI no anuncia autenticación por cookie, bearer token, C
 
 ### Búsqueda, paginación y CSV
 
-La UI presenta búsqueda libre, prioridad, estado y rango de fechas. `camara_id` se admite en el tipo cliente/API, pero no se ofrece actualmente como filtro visible. El paginador envía `limit=50` y modifica `offset`; el frontend asume que `GET /api/eventos` devuelve un array directo, que coincide con OpenAPI.
+La UI presenta búsqueda libre, prioridad, estado, cámara y rango de fechas. El selector de cámara se carga desde `GET /api/camaras` y envía su `camera_id` como `camara_id`; si falla esa petición, muestra un estado de error discreto junto al filtro. El paginador envía `limit=50` y modifica `offset`; el frontend asume que `GET /api/eventos` devuelve un array directo, que coincide con OpenAPI.
 
 La exportación CSV no es una llamada API. Serializa `this.events`, aplica escape de comillas y BOM UTF-8, e incluye los filtros aplicados como metadatos. Exporta únicamente los registros cargados en la página actual; el frontend no obtiene más páginas automáticamente para generar un CSV completo.
 
