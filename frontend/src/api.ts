@@ -9,6 +9,7 @@ export interface RiskEvent {
   camera: string;
   date: string;
   time: string;
+  occurred_at?: string;
   priority: Priority;
   status: EventStatus;
   description?: string | null;
@@ -65,6 +66,14 @@ export interface ZoneRecord {
   camera_id: number;
 }
 
+export interface AuthUser { id: number | string; name: string; email: string; }
+export interface AuthSession { authenticated: true; user: AuthUser; }
+export interface AlertStreamMessage {
+  tipo: "alerta_nueva" | "evento_revisado" | "ping";
+  alerta?: AlertRecord;
+  evento?: RiskEvent;
+}
+
 export interface EventFilters {
   q?: string;
   prioridad?: string;
@@ -87,13 +96,14 @@ export class ApiError extends Error {
 }
 
 export class SafeVisionApi {
-  private readonly baseUrl = (import.meta.env.VITE_API_URL || "https://safevision-backend-pw6t.onrender.com").replace(/\/$/, "");
+  readonly baseUrl = (import.meta.env.VITE_API_URL || "https://safevision-backend-pw6t.onrender.com").replace(/\/$/, "");
 
   async request<T>(path: string, init: RequestInit = {}): Promise<T> {
     let response: Response;
     try {
       response = await fetch(`${this.baseUrl}${path}`, {
         ...init,
+        signal: init.signal ?? AbortSignal.timeout(90_000),
         credentials: "include",
         headers: { Accept: "application/json", ...init.headers },
       });
@@ -127,6 +137,18 @@ export class SafeVisionApi {
   }
 
   health(): Promise<Record<string, string>> { return this.request("/health"); }
+  login(email: string, password: string): Promise<AuthSession> {
+    return this.request("/api/auth/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email, password }) });
+  }
+  currentUser(): Promise<AuthSession> { return this.request("/api/auth/me"); }
+  logout(): Promise<void> { return this.request("/api/auth/logout", { method: "POST" }); }
+  wsTicket(): Promise<{ ticket: string }> { return this.request("/api/auth/ws-ticket"); }
+  alertWebSocketUrl(ticket: string): string {
+    const url = new URL("/ws/alertas", this.baseUrl);
+    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    url.searchParams.set("ticket", ticket);
+    return url.toString();
+  }
   metrics(): Promise<Metrics> { return this.request("/api/metricas"); }
   events(filters: EventFilters = {}): Promise<RiskEvent[]> {
     const query = new URLSearchParams();
